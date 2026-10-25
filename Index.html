@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined" rel="stylesheet">
+  <?!= include('Stylesheet'); ?>
+</head>
+<body>
+
+  <header class="topbar">
+    <div class="topbar-title">
+      <img class="topbar-logo" src="https://www.gstatic.com/images/branding/product/1x/play_48dp.png" alt="Google Play">
+      <div>
+        <h1>MyPlayCases</h1>
+        <p id="topbarGreeting"><span id="topbarGreetingText">Loading…</span><span class="viewer-role-badge hidden" id="viewerRoleBadge"></span></p>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <button class="refresh-btn" id="exportBtn" type="button" data-tooltip="Export current view as CSV" aria-label="Export current view as CSV">
+        <span class="material-symbols-outlined">download</span>
+      </button>
+      <button class="refresh-btn" id="printBtn" type="button" data-tooltip="Print current view" aria-label="Print current view">
+        <span class="material-symbols-outlined">print</span>
+      </button>
+      <button class="refresh-btn" id="refreshBtn" type="button" data-tooltip="Refresh data" aria-label="Refresh data">
+        <span class="material-symbols-outlined">refresh</span>
+      </button>
+      <button class="refresh-btn" id="helpBtn" type="button" data-tooltip="Help & tips" aria-label="Help and tips">
+        <span class="material-symbols-outlined">help</span>
+      </button>
+    </div>
+  </header>
+
+  <div class="meta-strip" id="metaStrip">
+    <span id="metaStripText">Loading…</span>
+    <span id="lastSyncedText"></span>
+    <a href="https://mail.google.com/mail/?view=cm&fs=1&to=stevenjosephc@google.com&su=MyPlayCases%20feedback" target="_blank" class="feedback-link" data-tooltip="Send feedback">
+      <span class="material-symbols-outlined">feedback</span>
+    </a>
+  </div>
+
+    <div class="error-banner hidden" id="errorBanner" role="alert" aria-live="assertive">
+    <span class="material-symbols-outlined">error</span>
+    <span id="errorBannerMsg"></span>
+    <button id="errorBannerRetry" class="toggle-btn small hidden">Retry</button>
+  </div>
+
+  <div class="error-banner warning-banner hidden" id="warningBanner" role="status" aria-live="polite">
+    <span class="material-symbols-outlined">warning</span>
+    <span id="warningBannerMsg"></span>
+    <button id="warningBannerDismiss" class="toggle-btn small" type="button">Dismiss</button>
+  </div>
+
+  <main>
+
+    <div class="skeleton-view" id="skeletonView">
+      <div class="card filter-bar skeleton-filter-bar">
+        <div class="skel skel-field"></div>
+        <div class="skel skel-field"></div>
+        <div class="skel skel-field"></div>
+        <div class="skel skel-field"></div>
+      </div>
+      <div class="card profile-card skeleton-profile-card">
+        <div class="skel skel-avatar"></div>
+        <div class="skel-profile-lines">
+          <div class="skel skel-line skel-line-wide"></div>
+          <div class="skel skel-line skel-line-narrow"></div>
+        </div>
+      </div>
+      <div class="metric-cards">
+        <div class="metric-card skeleton-metric-card"><div class="skel skel-icon"></div><div class="skel-profile-lines"><div class="skel skel-line skel-line-narrow"></div><div class="skel skel-line skel-line-wide"></div></div></div>
+        <div class="metric-card skeleton-metric-card"><div class="skel skel-icon"></div><div class="skel-profile-lines"><div class="skel skel-line skel-line-narrow"></div><div class="skel skel-line skel-line-wide"></div></div></div>
+        <div class="metric-card skeleton-metric-card"><div class="skel skel-icon"></div><div class="skel-profile-lines"><div class="skel skel-line skel-line-narrow"></div><div class="skel skel-line skel-line-wide"></div></div></div>
+      </div>
+      <div class="card skeleton-table-card">
+        <div class="skel skel-table"></div>
+      </div>
+    </div>
+
+    <div id="appContent" class="hidden">
+
+    <section class="card filter-bar">
+      <div class="field">
+        <label for="metricSelect">Metric</label>
+          <select id="metricSelect">
+          <option value="Handled Cases">Handled cases</option>
+          <option value="AHT">AHT</option>
+          <option value="Reopens">Reopens</option>
+          <option value="Cases Closed">Cases closed</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <label>Channel</label>
+        <div class="dropdown" id="channelDropdown">
+          <button type="button" class="dropdown-trigger" id="channelTrigger" data-tooltip="Filter AHT/volume by channel">
+            <span class="material-symbols-outlined channel-icon icon-blue" id="channelTriggerIcon">chat_bubble</span>
+            <span id="channelTriggerLabel">Chat</span>
+            <span class="material-symbols-outlined dropdown-caret">expand_more</span>
+          </button>
+          <div class="dropdown-menu" id="channelMenu">
+            <div class="dropdown-item" data-value="Chat"><span class="material-symbols-outlined channel-icon icon-blue">chat_bubble</span>Chat</div>
+            <div class="dropdown-item" data-value="Phone"><span class="material-symbols-outlined channel-icon icon-green">call</span>Phone</div>
+            <div class="dropdown-item" data-value="Email"><span class="material-symbols-outlined channel-icon icon-yellow">mail</span>Email</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="teamFilterSelect">Team</label>
+        <select id="teamFilterSelect">
+          <option value="">All teams</option>
+        </select>
+      </div>
+
+      <div class="field field-agent">
+        <label>Agent</label>
+        <div class="dropdown" id="agentDropdown">
+          <button type="button" class="dropdown-trigger" id="agentTrigger" data-tooltip="Search or pick an agent to view">
+            <img id="agentTriggerAvatar" class="row-avatar" src="" alt="">
+            <span id="agentTriggerLabel">Loading agents…</span>
+            <span class="material-symbols-outlined dropdown-caret">expand_more</span>
+          </button>
+          <div class="dropdown-menu dropdown-menu-agent" id="agentMenu">
+                <div class="dropdown-search">
+                  <span class="material-symbols-outlined">search</span>
+                  <input type="text" id="agentSearch" placeholder="Search agent…">
+                </div>
+                <div class="dropdown-list" id="agentList"></div>
+              </div>
+            </div>
+          </div>
+
+      <div class="field">
+        <label>Saved views
+          <span class="material-symbols-outlined" id="saveViewBtn" role="button" tabindex="0" data-tooltip="Save current filters as a view" aria-label="Save current filters as a view" style="cursor:pointer;font-size:16px;">bookmark_add</span>
+        </label>
+        <div class="dropdown" id="savedViewsDropdown">
+          <button type="button" class="dropdown-trigger" id="savedViewsTrigger" data-tooltip="Jump to a saved filter combo">
+            <span class="material-symbols-outlined">bookmark</span>
+            <span id="savedViewsTriggerLabel">Saved views</span>
+            <span class="material-symbols-outlined dropdown-caret">expand_more</span>
+          </button>
+          <div class="dropdown-menu" id="savedViewsMenu">
+            <div class="dropdown-list" id="savedViewsList"></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="profile-card card" id="profileCard">
+      <img id="profileAvatar" class="profile-avatar-lg" src="" alt="">
+      <div class="profile-info">
+        <p class="profile-name" id="profileName">—</p>
+        <p class="profile-sub" id="profileSub">Select an agent to view profile</p>
+        <div class="profile-badges" id="profileBadges"></div>
+        <span class="profile-incomplete-badge hidden" id="profileIncompleteBadge">
+          <span class="material-symbols-outlined">error_outline</span>Profile incomplete — not in Agent Data
+        </span>
+      </div>
+      <div class="profile-stats" id="profileStats"></div>
+    </section>
+
+    <section class="metric-cards" id="metricCardsSection">
+      <div class="metric-card">
+        <span class="material-symbols-outlined metric-icon icon-blue">stacked_bar_chart</span>
+        <div>
+          <p class="metric-label" id="totalHandledLabel">Total handled</p>
+          <p class="metric-value" id="totalHandled">—</p>
+        </div>
+      </div>
+      <div class="metric-card">
+        <span class="material-symbols-outlined metric-icon icon-green">timer</span>
+        <div>
+          <p class="metric-label">Avg Seconds</p>
+          <p class="metric-value" id="avgAht">—</p>
+        </div>
+      </div>
+      <div class="metric-card">
+        <span class="material-symbols-outlined metric-icon icon-yellow">event_available</span>
+        <div>
+          <p class="metric-label">Data as of</p>
+          <p class="metric-value" id="dataAsOf">—</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="view-toggle">
+      <div class="toggle-group" role="group" aria-label="View selector">
+        <button class="toggle-btn active" id="btnInterval" type="button" data-tooltip="Hour-by-day grid for one agent" aria-pressed="true">
+          <span class="material-symbols-outlined">view_column</span> Interval
+        </button>
+        <button class="toggle-btn" id="btnCalendar" type="button" data-tooltip="Month view, one total per day" aria-pressed="false">
+          <span class="material-symbols-outlined">calendar_month</span> Calendar
+        </button>
+        <button class="toggle-btn" id="btnCompare" type="button" data-tooltip="Compare up to 3 agents side by side" aria-pressed="false">
+          <span class="material-symbols-outlined">compare_arrows</span> Compare
+        </button>
+        <button class="toggle-btn" id="btnInsights" type="button" data-tooltip="Team/site trends and aggregate heatmap" aria-pressed="false">
+          <span class="material-symbols-outlined">insights</span> Insights
+        </button>
+      </div>
+      <div class="toggle-group" id="intervalModeGroup" role="group" aria-label="Interval range">
+        <button class="toggle-btn small active" id="btnWeek" type="button" data-tooltip="Show a 7-day window" aria-pressed="true">Week</button>
+        <button class="toggle-btn small" id="btnMonth" type="button" data-tooltip="Show the full month" aria-pressed="false">Month</button>
+      </div>
+    </section>
+
+    <p class="cell-legend">
+      <span class="legend-item"><span class="legend-swatch legend-data-swatch"></span>Has data (darker = higher)</span>
+      <span class="legend-item"><span class="legend-swatch legend-empty-swatch"></span>– No activity that hour</span>
+      <span class="legend-item"><span class="legend-swatch legend-nt-swatch"></span>NT — not tracked for this channel</span>
+    </p>
+
+    <section class="card view-nav" id="intervalNav">
+      <button class="nav-btn" id="intervalPrev" type="button" aria-label="Previous period"><span class="material-symbols-outlined">chevron_left</span></button>
+      <p class="nav-label" id="intervalLabel">—</p>
+      <button class="nav-btn" id="intervalNext" type="button" aria-label="Next period"><span class="material-symbols-outlined">chevron_right</span></button>
+      <button class="toggle-btn small" id="btnToday" type="button" data-tooltip="Jump to the current week">Today</button>
+    </section>
+
+    <section class="card table-card" id="intervalView">
+      <div class="interval-scroll">
+        <table class="interval-table" id="intervalTable"></table>
+      </div>
+    </section>
+
+    <section class="card view-nav hidden" id="calendarNav">
+      <button class="nav-btn" id="calendarPrev" type="button" aria-label="Previous month"><span class="material-symbols-outlined">chevron_left</span></button>
+      <p class="nav-label" id="calendarLabel">—</p>
+      <button class="nav-btn" id="calendarNext" type="button" aria-label="Next month"><span class="material-symbols-outlined">chevron_right</span></button>
+    </section>
+
+    <section class="card hidden" id="calendarView">
+      <div class="calendar-weekdays" id="calendarWeekdays"></div>
+      <div class="calendar-grid" id="calendarGrid"></div>
+    </section>
+
+    <section class="card compare-view hidden" id="compareView">
+      <div class="compare-picker">
+        <div class="dropdown" id="compareDropdown">
+          <button type="button" class="dropdown-trigger" id="compareTrigger">
+            <span class="material-symbols-outlined">group</span>
+            <span id="compareTriggerLabel">Select up to 3 agents</span>
+            <span class="material-symbols-outlined dropdown-caret">expand_more</span>
+          </button>
+          <div class="dropdown-menu dropdown-menu-agent" id="compareMenu">
+            <div class="dropdown-search">
+              <span class="material-symbols-outlined">search</span>
+              <input type="text" id="compareSearch" placeholder="Search agent…">
+            </div>
+            <div class="dropdown-list" id="compareList"></div>
+          </div>
+        </div>
+      </div>
+      <div id="compareTables"></div>
+    </section>
+
+    <section class="card hidden" id="insightsView">
+      <p class="insights-scope" id="insightsScopeLabel">—</p>
+      <div class="metric-cards">
+        <div class="metric-card">
+          <span class="material-symbols-outlined metric-icon icon-blue">stacked_bar_chart</span>
+          <div>
+            <p class="metric-label" id="insightsTotalLabel">Total handled (vs last week)</p>
+            <p class="metric-value" id="insightsTotalTrend">—</p>
+          </div>
+        </div>
+        <div class="metric-card" id="insightsAhtCard">
+          <span class="material-symbols-outlined metric-icon icon-green">timer</span>
+          <div>
+            <p class="metric-label">Avg AHT (vs last week)</p>
+            <p class="metric-value" id="insightsAhtTrend">—</p>
+          </div>
+        </div>
+      </div>
+      <div class="insights-leaderboard" id="insightsLeaderboard">
+        <div class="leaderboard-col">
+          <p class="leaderboard-title" id="leaderboardTopTitle">Highest</p>
+          <ol class="leaderboard-list" id="leaderboardTopList"></ol>
+        </div>
+        <div class="leaderboard-col">
+          <p class="leaderboard-title" id="leaderboardBottomTitle">Lowest</p>
+          <ol class="leaderboard-list" id="leaderboardBottomList"></ol>
+        </div>
+      </div>
+      <p class="insights-subheading">
+        Team heatmap — this week
+        <span class="insights-legend"><span class="legend-swatch legend-breach"></span>Over AHT target</span>
+      </p>
+      <div class="interval-scroll">
+        <table class="interval-table" id="insightsAggTable"></table>
+      </div>
+    </section>
+
+    </div>
+
+  </main>
+
+  <div class="help-backdrop hidden" id="helpBackdrop"></div>
+  <aside class="help-panel" id="helpPanel">
+    <div class="help-panel-header">
+      <h2>Help &amp; tips</h2>
+      <button class="nav-btn" id="helpPanelClose" type="button" aria-label="Close help">
+        <span class="material-symbols-outlined">close</span>
+      </button>
+    </div>
+    <div class="help-panel-body">
+      <section>
+        <h3>Filters</h3>
+        <p>Metric, Channel, Team, and Agent narrow what the heatmap shows. Team defaults to your own team if you're a lead.</p>
+      </section>
+      <section>
+        <h3>Views</h3>
+        <p><strong>Interval</strong> — hour-by-day grid for one agent, toggle Week/Month.<br>
+        <strong>Calendar</strong> — one total per day; click a day to jump to that week.<br>
+        <strong>Compare</strong> — up to 3 agents side by side.<br>
+        <strong>Insights</strong> — team/site trends with AHT-target highlighting.</p>
+      </section>
+      <section>
+        <h3>Favorites &amp; recents</h3>
+        <p>Star an agent in the dropdown to pin them to the top. Your last few selections show under Recent automatically.</p>
+      </section>
+      <section>
+        <h3>Export</h3>
+        <p>The download icon exports whatever view is currently on screen as a CSV.</p>
+      </section>
+      <section>
+        <h3>Keyboard</h3>
+        <p>Left/Right arrows step between weeks or months in Interval, Compare, and Insights.</p>
+      </section>
+      <button class="toggle-btn" id="helpReplayTour" type="button">
+        <span class="material-symbols-outlined">replay</span> Replay the guided tour
+      </button>
+    </div>
+  </aside>
+
+  <div class="tour-backdrop hidden" id="tourBackdrop"></div>
+  <div class="tour-highlight hidden" id="tourHighlight"></div>
+  <div class="tour-card hidden" id="tourCard">
+    <p class="tour-step-count" id="tourStepCount">1 / 10</p>
+    <h3 id="tourStepTitle">—</h3>
+    <p id="tourStepText">—</p>
+    <div class="tour-actions">
+      <button class="toggle-btn small" id="tourSkipBtn" type="button">Skip</button>
+      <div class="tour-actions-right">
+        <button class="toggle-btn small hidden" id="tourBackBtn" type="button">Back</button>
+        <button class="toggle-btn small active" id="tourNextBtn" type="button">Next</button>
+      </div>
+    </div>
+  </div>
+
+  <?!= include('Logging'); ?>
+  <?!= include('GuideTour'); ?>
+  <?!= include('JavaScript'); ?>
+</body>
+</html>
