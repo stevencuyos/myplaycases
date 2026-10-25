@@ -1,0 +1,1304 @@
+<script>
+/* ---------- STATE ---------- */
+let DATA = null;
+let currentAgent = '';
+let currentMetric = 'Handled Cases';
+let currentChannel = 'Chat';
+let currentView = 'interval';
+let intervalMode = 'week';
+let weekStart = null;
+let monthAnchor = null;
+let calAnchor = null;
+let isLoading = false;
+let loadWatchdog = null;
+let currentTeamFilter = '';
+let viewerTeam = '';
+let compareAgents = [];
+
+const PREF_KEY = 'myPlayCases.prefs';
+function loadPrefs() {
+  try { return JSON.parse(localStorage.getItem(PREF_KEY)) || {}; } catch (e) { return {}; }
+}
+function savePrefs(patch) {
+  try {
+    const prefs = loadPrefs();
+    Object.assign(prefs, patch);
+    localStorage.setItem(PREF_KEY, JSON.stringify(prefs));
+  } catch (e) { /* storage unavailable, ignore */ }
+}
+
+window.onerror = function (msg, url, line) {
+  showFatalError('Unexpected error: ' + msg + (line ? ' (line ' + line + ')' : ''), true, false);
+  return false;
+};
+
+const METRIC_FIELD = {
+  Chat:  { ahtKey: 'chatAHT',  countKey: 'chats'  },
+  Phone: { ahtKey: 'phoneAHT', countKey: 'calls'  },
+  Email: { ahtKey: null,       countKey: 'emails' }
+};
+const CHANNEL_ICON = {
+  Chat:  { icon: 'chat_bubble', cls: 'icon-blue' },
+  Phone: { icon: 'call',        cls: 'icon-green' },
+  Email: { icon: 'mail',        cls: 'icon-yellow' }
+};
+const AHT_TARGETS = { Chat: 1200, Phone: 820 };
+
+const METRIC_TOTAL_LABEL = {
+  'Handled Cases': 'Total handled',
+  'AHT': 'Total handled',
+  'Reopens': 'Total reopens',
+  'Cases Closed': 'Total closed'
+};
+// Whether a higher number is a good sign for this metric's total.
+// (AHT's *total* card still shows case volume, not the AHT itself — volume up is fine.)
+const METRIC_HIGHER_IS_BETTER = {
+  'Handled Cases': true,
+  'Cases Closed': true,
+  'Reopens': false,
+  'AHT': true
+};
+
+/* ---------- INIT ---------- */
+document.addEventListener('DOMContentLoaded', function () {
+  bindStaticEvents();
+  enableControls(false);
+  startUsageFlushLoop();
+  logUsageEvent('open');
+  loadData();
+});
+
+let refreshCooldownUntil = 0;
+function refreshWithCooldown_() {
+  const now = Date.now();
+  if (now < refreshCooldownUntil) return;
+  refreshCooldownUntil = now + 5000;
+  const btn = document.getElementById('refreshBtn');
+  btn.disabled = true;
+  setTimeout(function () { btn.disabled = false; }, 5000);
+  logUsageEvent('click', 'refresh');
+  loadData(true);
+}
+
+function loadData(bypassCache) {
+  if (isLoading) return;
+  isLoading = true;
+  showLoadingState();
+  document.getElementById('refreshBtn').classList.add('spinning');
+  clearTimeout(loadWatchdog);
+  loadWatchdog = setTimeout(function () {
+    showFatalError('Still loading — this is taking longer than expected. The sheet may be large or the server is slow.', true, true);
+  }, 20000);
+  google.script.run.withSuccessHandler(onDataLoaded).withFailureHandler(onDataError).getAllData(!!bypassCache);
+}
+
+function showLoadingState() {
+  hideFatalError();
+  document.getElementById('metaStripText').textContent = 'Loading…';
+  if (!DATA) {
+    document.getElementById('topbarGreetingText').textContent = 'Loading…';
+    document.getElementById('skeletonView').classList.remove('hidden');
+    document.getElementById('appContent').classList.add('hidden');
+  }
+}
+
+function renderGreeting(viewer) {
+  const hour = new Date().getHours();
+  const part = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
+  const ldap = (viewer && viewer.ldap) ? viewer.ldap : '';
+  document.getElementById('topbarGreetingText').textContent = ldap ? part + ', ' + ldap : part;
+
+  const badge = document.getElementById('viewerRoleBadge');
+  if (viewer && viewer.info && viewer.info.role) {
+    badge.textContent = viewer.info.role;
+    badge.classList.remove('hidden');
+  } else {
+    badge.classList.add('hidden');
+  }
+}
+
+function populateTeamFilter() {
+  const sel = document.getElementById('teamFilterSelect');
+  const teams = Array.from(new Set(
+    Object.values(DATA.agentInfo || {}).map(function (i) { return i.team; }).filter(function (t) { return t && t !== '-'; })
+  )).sort();
+  sel.innerHTML = '<option value="">All teams</option>' +
+    teams.map(function (t) { return '<option value="' + escapeHtml(t) + '">' + escapeHtml(t) + '</option>'; }).join('');
+  sel.value = currentTeamFilter;
+}
+function jumpToToday() {
+  const now = new Date();
+  weekStart = sundayOf(now);
+  monthAnchor = new Date(now.getFullYear(), now.getMonth(), 1);
+  renderAll();
+}
+
+function showWarning(msg) {
+  document.getElementById('warningBannerMsg').textContent = msg;
+  document.getElementById('warningBanner').classList.remove('hidden');
+}
+function hideWarning() {
+  document.getElementById('warningBanner').classList.add('hidden');
+}
+function showFatalError(msg, retryable, disable) {
+  const banner = document.getElementById('errorBanner');
+  document.getElementById('errorBannerMsg').textContent = msg;
+  banner.classList.remove('hidden');
+  document.getElementById('errorBannerRetry').classList.toggle('hidden', !retryable);
+  if (disable) enableControls(false);
+}
+function hideFatalError() {
+  document.getElementById('errorBanner').classList.add('hidden');
+}
+
+function enableControls(enabled) {
+  document.getElementById('metricSelect').disabled = !enabled;
+  document.getElementById('channelTrigger').disabled = !enabled;
+  document.getElementById('agentTrigger').disabled = !enabled;
+  if (enabled) updateChannelFieldState();
+}
+
+function onDataError(err) {
+  isLoading = false;
+  clearTimeout(loadWatchdog);
+  document.getElementById('refreshBtn').classList.remove('spinning');
+  document.getElementById('skeletonView').classList.add('hidden');
+  document.getElementById('appContent').classList.remove('hidden');
+  showFatalError('Failed to load data: ' + (err && err.message ? err.message : err), true, true);
+}
+
+function onDataLoaded(data) {
+  isLoading = false;
+  clearTimeout(loadWatchdog);
+  document.getElementById('refreshBtn').classList.remove('spinning');
+  try {
+    hideFatalError();
+    hideWarning();
+    DATA = data;
+    if (data.warnings && data.warnings.length) showWarning(data.warnings.join(' '));
+    const maxD = data.maxDate ? parseDateKey(data.maxDate) : new Date();
+    weekStart = sundayOf(maxD);
+    monthAnchor = new Date(maxD.getFullYear(), maxD.getMonth(), 1);
+    calAnchor = new Date(monthAnchor);
+
+    const prefs = loadPrefs();
+    if (prefs.metric) { currentMetric = prefs.metric; document.getElementById('metricSelect').value = prefs.metric; }
+    if (prefs.channel && CHANNEL_ICON[prefs.channel]) {
+      currentChannel = prefs.channel;
+      const meta = CHANNEL_ICON[currentChannel];
+      document.getElementById('channelTriggerIcon').textContent = meta.icon;
+      document.getElementById('channelTriggerIcon').className = 'material-symbols-outlined channel-icon ' + meta.cls;
+      document.getElementById('channelTriggerLabel').textContent = currentChannel;
+    }
+    updateChannelFieldState();
+
+    viewerTeam = (data.viewer && data.viewer.info && data.viewer.info.team) || '';
+    currentTeamFilter = ('teamFilter' in prefs) ? prefs.teamFilter
+      : ((data.viewer && data.viewer.isLead && viewerTeam) ? viewerTeam : '');
+    populateTeamFilter();
+    buildAgentList();
+
+    // NEW
+    compareAgents = (prefs.compareAgents || []).filter(function (a) { return data.agents.indexOf(a) > -1; });
+    updateCompareTriggerLabel();
+    buildCompareList();
+    buildSavedViewsList();
+
+    const defaultAgent = (prefs.agent && data.agents.indexOf(prefs.agent) > -1) ? prefs.agent
+      : (data.viewer && data.viewer.ldap && data.agents.indexOf(data.viewer.ldap) > -1) ? data.viewer.ldap
+      : data.agents[0];
+    if (data.agents.length) {
+      selectAgent(defaultAgent);
+    } else {
+      showFatalError('No agent data found in "Heatmap  Raw". Check the sheet has rows.', true, false);
+    }
+
+    document.getElementById('metaStripText').textContent =
+      data.agents.length + ' agents · ' + (data.minDate || '—') + ' to ' + (data.maxDate || '—');
+    document.getElementById('lastSyncedText').textContent = data.computedAt
+      ? '· synced ' + timeAgo_(new Date(data.computedAt))
+      : '';
+    renderGreeting(data.viewer);
+
+    document.getElementById('skeletonView').classList.add('hidden');
+    document.getElementById('appContent').classList.remove('hidden');
+    enableControls(true);
+    renderAll();
+    if (!window.__guideTourInitialized) {
+      window.__guideTourInitialized = true;
+      initGuideTour();
+    }
+  } catch (err) {
+    console.error(err);
+    showFatalError('Failed to initialize the view: ' + err.message, true, true);
+  }
+}
+
+/* ---------- DATE HELPERS ---------- */
+function parseDateKey(key) {
+  const p = key.split('-');
+  return new Date(parseInt(p[0],10), parseInt(p[1],10)-1, parseInt(p[2],10));
+}
+function toDateKey(d) {
+  return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+}
+function sundayOf(d) { const r = new Date(d); r.setDate(r.getDate() - r.getDay()); return r; }
+function addDays(d, n) { const r = new Date(d); r.setDate(r.getDate() + n); return r; }
+function addMonths(d, n) { return new Date(d.getFullYear(), d.getMonth()+n, 1); }
+function isSameDate(a,b) { return a.getFullYear()===b.getFullYear() && a.getMonth()===b.getMonth() && a.getDate()===b.getDate(); }
+function fmtRangeLabel(start, end) {
+  const opts = { month:'short', day:'numeric' };
+  return start.toLocaleDateString('en-US', opts) + ' – ' + end.toLocaleDateString('en-US', opts) + ', ' + start.getFullYear();
+}
+function fmtMonthLabel(d) { return d.toLocaleDateString('en-US', { month:'long', year:'numeric' }); }
+function timeAgo_(d) {
+  const mins = Math.round((Date.now() - d.getTime()) / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return mins + 'm ago';
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return hrs + 'h ago';
+  return d.toLocaleDateString('en-US', { month:'short', day:'numeric' });
+}
+function fmtSeconds(sec) {
+  if (sec === null || sec === undefined || isNaN(sec)) return '—';
+  return Math.round(sec).toLocaleString() + 's';
+}
+function weekdayShort(d) { return d.toLocaleDateString('en-US', { weekday:'short' }); }
+function hourLabel(h) { if (h===0) return '12 AM'; if (h===12) return '12 PM'; return h<12 ? h+' AM' : (h-12)+' PM'; }
+function weekRangeDays() { const a=[]; for (let i=0;i<7;i++) a.push(addDays(weekStart,i)); return a; }
+function monthRangeDays(anchor) {
+  const a=[]; const n = new Date(anchor.getFullYear(), anchor.getMonth()+1, 0).getDate();
+  for (let i=0;i<n;i++) a.push(new Date(anchor.getFullYear(), anchor.getMonth(), i+1));
+  return a;
+}
+function currentPeriodDays() {
+  if (currentView === 'calendar') return monthRangeDays(calAnchor);
+  return intervalMode === 'week' ? weekRangeDays() : monthRangeDays(monthAnchor);
+}
+function previousPeriodDays() {
+  if (currentView === 'calendar') return monthRangeDays(addMonths(calAnchor, -1));
+  if (intervalMode === 'week') return weekRangeDays().map(function (d) { return addDays(d, -7); });
+  return monthRangeDays(addMonths(monthAnchor, -1));
+}
+
+/* ---------- DATA LOOKUPS ---------- */
+function agentDates(agent) { return DATA.index[agent] || {}; }
+function hourRecord(agent, dateKey, hour) {
+  const d = agentDates(agent);
+  return (d[dateKey] && d[dateKey][hour]) ? d[dateKey][hour] : null;
+}
+// NEW
+function cellValue(agent, dateKey, hour) {
+  const rec = hourRecord(agent, dateKey, hour);
+  const f = METRIC_FIELD[currentChannel];
+  if (!rec) return { value: null, tracked: true, count: null };
+  const count = rec[f.countKey];
+  if (currentMetric === 'Reopens') return { value: rec.reopens, tracked: true, count: count };
+  if (currentMetric === 'Cases Closed') return { value: rec.casesClosed, tracked: true, count: count };
+  if (currentMetric === 'AHT') {
+    if (!f.ahtKey) return { value: null, tracked: false, count: count };
+    return { value: rec[f.ahtKey], tracked: true, count: count };
+  }
+  return { value: rec[f.countKey], tracked: true, count: count };
+}
+function dayAggregate(agent, dateKey) {
+  const dates = agentDates(agent);
+  const hours = dates[dateKey];
+  if (!hours) return { value: null, tracked: true };
+
+  if (currentMetric === 'Reopens' || currentMetric === 'Cases Closed') {
+    const key = currentMetric === 'Reopens' ? 'reopens' : 'casesClosed';
+    let total = 0, any = false;
+    Object.keys(hours).forEach(function (h) {
+      const v = hours[h][key];
+      if (v !== null && v !== undefined) { total += v; any = true; }
+    });
+    return { value: any ? total : null, tracked: true };
+  }
+
+  const f = METRIC_FIELD[currentChannel];
+  if (currentMetric === 'Handled Cases') {
+    let total = 0, any = false;
+    Object.keys(hours).forEach(function (h) {
+      const v = hours[h][f.countKey];
+      if (v !== null && v !== undefined) { total += v; any = true; }
+    });
+    return { value: any ? total : null, tracked: true };
+  }
+// NEW
+  if (!f.ahtKey) return { value: null, tracked: false };
+  let wSum = 0, w = 0;
+  agents.forEach(function (agent) {
+    const rec = hourRecord(agent, dateKey, hour);
+    if (rec) {
+      const aht = rec[f.ahtKey], cnt = rec[f.countKey];
+      if (aht !== null && aht !== undefined && cnt) { wSum += aht*cnt; w += cnt; }
+    }
+  });
+  return { value: w ? wSum/w : null, tracked: true, count: w || null };
+}
+
+/* ---------- AVATAR ---------- */
+function momaUrl(ldap, size) { return 'https://moma-teams-photos.corp.google.com/photos/' + encodeURIComponent(ldap) + '?sz=' + (size||100); }
+function momaFallback(ldap, size) { return momaUrl(ldap, size) + '&type=SECURITY&type=SILHOUETTE'; }
+function setAvatar(imgEl, ldap, size) {
+  imgEl.onerror = function () { this.onerror = null; this.src = momaFallback(ldap, size); };
+  imgEl.src = momaUrl(ldap, size);
+  imgEl.alt = ldap;
+}
+
+/* ---------- STATIC UI EVENTS ---------- */
+function bindStaticEvents() {
+  document.getElementById('metricSelect').addEventListener('change', function (e) {
+    currentMetric = e.target.value;
+    logUsageEvent('click', 'metric_' + currentMetric);
+    updateChannelFieldState();
+    savePrefs({ metric: currentMetric });
+    renderAll();
+  });
+
+  document.getElementById('teamFilterSelect').addEventListener('change', function (e) {
+    currentTeamFilter = e.target.value;
+    savePrefs({ teamFilter: currentTeamFilter });
+    buildAgentList();
+    if (currentView === 'insights') renderAll();
+  });
+
+  document.getElementById('btnToday').addEventListener('click', jumpToToday);
+
+  document.addEventListener('keydown', function (e) {
+    if (currentView !== 'interval' && currentView !== 'compare' && currentView !== 'insights') return;
+    const tag = (e.target && e.target.tagName) || '';
+    if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+    if (e.key === 'ArrowLeft') stepInterval(-1);
+    else if (e.key === 'ArrowRight') stepInterval(1);
+  });
+
+  const channelTrigger = document.getElementById('channelTrigger');
+  const channelMenu = document.getElementById('channelMenu');
+  channelTrigger.addEventListener('click', function (e) {
+    e.stopPropagation(); closeAllDropdowns('channelDropdown'); channelMenu.classList.toggle('open');
+  });
+  channelMenu.querySelectorAll('.dropdown-item').forEach(function (item) {
+    item.addEventListener('click', function () {
+      currentChannel = item.getAttribute('data-value');
+      const meta = CHANNEL_ICON[currentChannel];
+      document.getElementById('channelTriggerIcon').textContent = meta.icon;
+      document.getElementById('channelTriggerIcon').className = 'material-symbols-outlined channel-icon ' + meta.cls;
+      document.getElementById('channelTriggerLabel').textContent = currentChannel;
+      channelMenu.classList.remove('open');
+      savePrefs({ channel: currentChannel });
+      renderAll();
+    });
+  });
+
+  const agentTrigger = document.getElementById('agentTrigger');
+  const agentMenu = document.getElementById('agentMenu');
+  agentTrigger.addEventListener('click', function (e) {
+    e.stopPropagation(); closeAllDropdowns('agentDropdown'); agentMenu.classList.toggle('open');
+    if (agentMenu.classList.contains('open')) document.getElementById('agentSearch').focus();
+  });
+  document.getElementById('agentSearch').addEventListener('input', function (e) { filterAgentList(e.target.value); });
+  document.addEventListener('click', function () { closeAllDropdowns(); });
+
+  document.getElementById('btnInterval').addEventListener('click', function () { setView('interval'); });
+  document.getElementById('btnCalendar').addEventListener('click', function () { setView('calendar'); });
+  document.getElementById('btnCompare').addEventListener('click', function () { setView('compare'); });
+  document.getElementById('btnInsights').addEventListener('click', function () { setView('insights'); });
+
+  const compareTrigger = document.getElementById('compareTrigger');
+  const compareMenu = document.getElementById('compareMenu');
+  compareTrigger.addEventListener('click', function (e) {
+    e.stopPropagation(); closeAllDropdowns('compareDropdown'); compareMenu.classList.toggle('open');
+    if (compareMenu.classList.contains('open')) document.getElementById('compareSearch').focus();
+  });
+  // NEW
+  document.getElementById('compareSearch').addEventListener('input', function (e) {
+    const q = e.target.value.toLowerCase();
+    document.querySelectorAll('#compareList .agent-row').forEach(function (row) {
+      const a = row.getAttribute('data-agent').toLowerCase();
+      const n = (row.getAttribute('data-name') || '').toLowerCase();
+      row.style.display = (a.indexOf(q) > -1 || n.indexOf(q) > -1) ? '' : 'none';
+    });
+  });
+
+  document.getElementById('saveViewBtn').addEventListener('click', saveCurrentView);
+  document.getElementById('saveViewBtn').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); saveCurrentView(); }
+  });
+  const savedViewsTrigger = document.getElementById('savedViewsTrigger');
+  const savedViewsMenu = document.getElementById('savedViewsMenu');
+  savedViewsTrigger.addEventListener('click', function (e) {
+    e.stopPropagation(); closeAllDropdowns('savedViewsDropdown'); savedViewsMenu.classList.toggle('open');
+  });
+
+  document.getElementById('btnWeek').addEventListener('click', function () { setIntervalMode('week'); });
+  document.getElementById('btnMonth').addEventListener('click', function () { setIntervalMode('month'); });
+
+  document.getElementById('intervalPrev').addEventListener('click', function () { stepInterval(-1); });
+  document.getElementById('intervalNext').addEventListener('click', function () { stepInterval(1); });
+  document.getElementById('calendarPrev').addEventListener('click', function () { calAnchor = addMonths(calAnchor,-1); renderAll(); });
+  document.getElementById('calendarNext').addEventListener('click', function () { calAnchor = addMonths(calAnchor,1); renderAll(); });
+
+  // NEW
+  document.getElementById('exportBtn').addEventListener('click', function () { logUsageEvent('click', 'export'); exportCurrentView(); });
+  document.getElementById('printBtn').addEventListener('click', function () { logUsageEvent('click', 'print'); window.print(); });
+  document.getElementById('refreshBtn').addEventListener('click', function () { refreshWithCooldown_(); });
+  document.getElementById('errorBannerRetry').addEventListener('click', function () { refreshWithCooldown_(); });
+  document.getElementById('warningBannerDismiss').addEventListener('click', function () {
+    document.getElementById('warningBanner').classList.add('hidden');
+  });
+}
+function updateChannelFieldState() {
+  const disabled = (currentMetric === 'Reopens' || currentMetric === 'Cases Closed');
+  const trigger = document.getElementById('channelTrigger');
+  trigger.disabled = disabled;
+  trigger.classList.toggle('is-disabled', disabled);
+}
+
+// NEW
+function closeAllDropdowns(except) {
+  ['channelDropdown','agentDropdown','compareDropdown','savedViewsDropdown'].forEach(function (id) {
+    if (id === except) return;
+    const menu = document.querySelector('#' + id + ' .dropdown-menu');
+    if (menu) menu.classList.remove('open');
+  });
+}
+
+/* ---------- AGENT LIST ---------- */
+function makeAgentRow(agent, isFav) {
+  const hasProfile = !!(DATA.agentInfo && DATA.agentInfo[agent]);
+  const info = (DATA.agentInfo && DATA.agentInfo[agent]) || {};
+  const displayName = info.name || agent;
+  const row = document.createElement('div');
+  row.className = 'dropdown-item agent-row';
+  row.setAttribute('data-agent', agent);
+  row.setAttribute('data-name', displayName);
+  const star = document.createElement('span');
+  star.className = 'material-symbols-outlined agent-star' + (isFav ? ' is-fav' : '');
+  star.textContent = isFav ? 'star' : 'star_outline';
+  star.title = isFav ? 'Unfavorite' : 'Favorite';
+  star.setAttribute('aria-label', star.title);
+  star.addEventListener('click', function (e) { e.stopPropagation(); toggleFavorite(agent); });
+  const img = document.createElement('img');
+  img.className = 'row-avatar';
+  setAvatar(img, agent, 64);
+  const textWrap = document.createElement('div');
+  textWrap.className = 'agent-row-text';
+  const nameSpan = document.createElement('span');
+  nameSpan.className = 'agent-row-name';
+  nameSpan.textContent = displayName;
+  const ldapSpan = document.createElement('span');
+  ldapSpan.className = 'agent-row-ldap';
+  ldapSpan.textContent = agent + (hasProfile ? '' : ' · profile incomplete');
+  textWrap.appendChild(nameSpan);
+  textWrap.appendChild(ldapSpan);
+  row.appendChild(star); row.appendChild(img); row.appendChild(textWrap);
+  row.setAttribute('tabindex', '0');
+  row.setAttribute('role', 'button');
+  row.addEventListener('click', function () {
+    selectAgent(agent);
+    document.getElementById('agentMenu').classList.remove('open');
+  });
+  row.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      selectAgent(agent);
+      document.getElementById('agentMenu').classList.remove('open');
+    }
+  });
+  return row;
+}
+function orderedAgentGroups() {
+  const prefs = loadPrefs();
+  const favorites = prefs.favorites || [];
+  const recents = prefs.recents || [];
+  const passesFilter = function (agent) {
+    const info = (DATA.agentInfo && DATA.agentInfo[agent]) || {};
+    return DATA.agents.indexOf(agent) > -1 && (!currentTeamFilter || info.team === currentTeamFilter);
+  };
+  const favList = favorites.filter(passesFilter);
+  const favSet = new Set(favList);
+  const recentList = recents.filter(function (a) { return !favSet.has(a) && passesFilter(a); });
+  const recentSet = new Set(recentList);
+  const restList = DATA.agents.filter(function (a) { return !favSet.has(a) && !recentSet.has(a) && passesFilter(a); });
+  return { favList: favList, recentList: recentList, restList: restList };
+}
+function toggleFavorite(agent) {
+  const prefs = loadPrefs();
+  const favorites = prefs.favorites || [];
+  const idx = favorites.indexOf(agent);
+  if (idx > -1) favorites.splice(idx, 1); else favorites.push(agent);
+  savePrefs({ favorites: favorites });
+  buildAgentList();
+}
+function buildAgentList() {
+  const list = document.getElementById('agentList');
+  list.innerHTML = '';
+  const groups = orderedAgentGroups();
+  function addSection(label, agents, isFav) {
+    if (!agents.length) return;
+    if (label) {
+      const hdr = document.createElement('div');
+      hdr.className = 'agent-list-section';
+      hdr.textContent = label;
+      list.appendChild(hdr);
+    }
+    agents.forEach(function (agent) { list.appendChild(makeAgentRow(agent, isFav)); });
+  }
+  addSection(groups.favList.length ? 'Favorites' : '', groups.favList, true);
+  addSection(groups.recentList.length ? 'Recent' : '', groups.recentList, false);
+  addSection((groups.favList.length || groups.recentList.length) ? 'All agents' : '', groups.restList, false);
+}
+function filterAgentList(q) {
+  q = q.toLowerCase();
+  document.querySelectorAll('#agentList .agent-row').forEach(function (row) {
+    const a = row.getAttribute('data-agent').toLowerCase();
+    const n = (row.getAttribute('data-name') || '').toLowerCase();
+    row.style.display = (a.indexOf(q) > -1 || n.indexOf(q) > -1) ? '' : 'none';
+  });
+  document.querySelectorAll('#agentList .agent-list-section').forEach(function (hdr) {
+    let sib = hdr.nextElementSibling, anyVisible = false;
+    while (sib && !sib.classList.contains('agent-list-section')) {
+      if (sib.classList.contains('agent-row') && sib.style.display !== 'none') anyVisible = true;
+      sib = sib.nextElementSibling;
+    }
+    hdr.style.display = anyVisible ? '' : 'none';
+  });
+}
+
+/* ---------- COMPARE LIST ---------- */
+function buildCompareList() {
+  const list = document.getElementById('compareList');
+  list.innerHTML = '';
+  DATA.agents.forEach(function (agent) {
+    const info = (DATA.agentInfo && DATA.agentInfo[agent]) || {};
+    const displayName = info.name || agent;
+    const checked = compareAgents.indexOf(agent) > -1;
+    const disabled = !checked && compareAgents.length >= 3;
+    const row = document.createElement('div');
+    row.className = 'dropdown-item agent-row' + (disabled ? ' is-disabled' : '');
+    row.setAttribute('data-agent', agent);
+    row.setAttribute('data-name', displayName);
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.checked = checked;
+    box.disabled = disabled;
+    box.addEventListener('click', function (e) { e.stopPropagation(); });
+    box.addEventListener('change', function () { toggleCompareAgent(agent); });
+    const img = document.createElement('img');
+    img.className = 'row-avatar';
+    setAvatar(img, agent, 64);
+    const textWrap = document.createElement('div');
+    textWrap.className = 'agent-row-text';
+    const nameSpan = document.createElement('span');
+    nameSpan.className = 'agent-row-name';
+    nameSpan.textContent = displayName;
+    const ldapSpan = document.createElement('span');
+    ldapSpan.className = 'agent-row-ldap';
+    ldapSpan.textContent = agent;
+    textWrap.appendChild(nameSpan); textWrap.appendChild(ldapSpan);
+    row.appendChild(box); row.appendChild(img); row.appendChild(textWrap);
+    if (!disabled) {
+      row.setAttribute('tabindex', '0');
+      row.setAttribute('role', 'button');
+      row.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleCompareAgent(agent); }
+      });
+    }
+    row.addEventListener('click', function () { if (!disabled) toggleCompareAgent(agent); });
+    list.appendChild(row);
+  });
+}
+function toggleCompareAgent(agent) {
+  const idx = compareAgents.indexOf(agent);
+  if (idx > -1) compareAgents.splice(idx, 1);
+  else if (compareAgents.length < 3) compareAgents.push(agent);
+  savePrefs({ compareAgents: compareAgents });
+  updateCompareTriggerLabel();
+  buildCompareList();
+  if (currentView === 'compare') renderAll();
+}
+// Replace with:
+function updateCompareTriggerLabel() {
+  const label = document.getElementById('compareTriggerLabel');
+  if (!compareAgents.length) { label.textContent = 'Select up to 3 agents'; return; }
+  label.textContent = compareAgents.map(function (a) {
+    const info = (DATA.agentInfo && DATA.agentInfo[a]) || {};
+    return (info.name || a).split(',')[0];
+  }).join(', ');
+}
+
+/* ---------- SAVED VIEWS ---------- */
+function getSavedViews() { return loadPrefs().savedViews || []; }
+function setSavedViews(views) { savePrefs({ savedViews: views }); }
+
+function saveCurrentView() {
+  const name = window.prompt('Name this view (e.g. "My team\'s reopens"):');
+  if (!name) return;
+  const views = getSavedViews();
+  views.push({ name: name, metric: currentMetric, channel: currentChannel, teamFilter: currentTeamFilter });
+  setSavedViews(views);
+  buildSavedViewsList();
+  logUsageEvent('click', 'save_view');
+}
+
+function applySavedView(view) {
+  currentMetric = view.metric;
+  document.getElementById('metricSelect').value = currentMetric;
+  updateChannelFieldState();
+  savePrefs({ metric: currentMetric });
+
+  if (CHANNEL_ICON[view.channel]) {
+    currentChannel = view.channel;
+    const meta = CHANNEL_ICON[currentChannel];
+    document.getElementById('channelTriggerIcon').textContent = meta.icon;
+    document.getElementById('channelTriggerIcon').className = 'material-symbols-outlined channel-icon ' + meta.cls;
+    document.getElementById('channelTriggerLabel').textContent = currentChannel;
+    savePrefs({ channel: currentChannel });
+  }
+
+  currentTeamFilter = view.teamFilter || '';
+  document.getElementById('teamFilterSelect').value = currentTeamFilter;
+  savePrefs({ teamFilter: currentTeamFilter });
+  buildAgentList();
+
+  logUsageEvent('click', 'apply_view_' + view.name);
+  renderAll();
+}
+
+function deleteSavedView(idx) {
+  const views = getSavedViews();
+  views.splice(idx, 1);
+  setSavedViews(views);
+  buildSavedViewsList();
+}
+
+function buildSavedViewsList() {
+  const list = document.getElementById('savedViewsList');
+  const views = getSavedViews();
+  if (!views.length) {
+    list.innerHTML = '<div class="dropdown-item is-disabled">No saved views yet</div>';
+    return;
+  }
+  list.innerHTML = '';
+  views.forEach(function (view, idx) {
+    const row = document.createElement('div');
+    row.className = 'dropdown-item';
+    row.setAttribute('tabindex', '0');
+    row.setAttribute('role', 'button');
+    const label = document.createElement('span');
+    label.style.flex = '1';
+    label.textContent = view.name;
+    const del = document.createElement('span');
+    del.className = 'material-symbols-outlined agent-star';
+    del.textContent = 'close';
+    del.title = 'Remove this saved view';
+    del.setAttribute('aria-label', 'Remove saved view ' + view.name);
+    del.addEventListener('click', function (e) { e.stopPropagation(); deleteSavedView(idx); });
+    row.appendChild(label);
+    row.appendChild(del);
+    row.addEventListener('click', function () {
+      applySavedView(view);
+      document.getElementById('savedViewsMenu').classList.remove('open');
+    });
+    row.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        applySavedView(view);
+        document.getElementById('savedViewsMenu').classList.remove('open');
+      }
+    });
+    list.appendChild(row);
+  });
+}
+
+function selectAgent(agent) {
+  logUsageEvent('click', 'select_agent');
+  currentAgent = agent;
+  const prefs = loadPrefs();
+  const recents = (prefs.recents || []).filter(function (a) { return a !== agent; });
+  recents.unshift(agent);
+  savePrefs({ agent: agent, recents: recents.slice(0, 5) });
+  buildAgentList();
+  const hasProfile = !!(DATA.agentInfo && DATA.agentInfo[agent]);
+  const info = (DATA.agentInfo && DATA.agentInfo[agent]) || {};
+  const displayName = info.name || agent;
+  document.getElementById('agentTriggerLabel').textContent = displayName;
+  setAvatar(document.getElementById('agentTriggerAvatar'), agent, 48);
+  setAvatar(document.getElementById('profileAvatar'), agent, 160);
+  document.getElementById('profileName').textContent = displayName;
+  document.getElementById('profileSub').textContent =
+    agent + (info.role ? ' · ' + info.role : '') + (info.team && info.team !== '-' ? ' · ' + info.team : '');
+  document.getElementById('profileIncompleteBadge').classList.toggle('hidden', hasProfile);
+  renderProfileBadges(info);
+  renderAll();
+}
+function renderProfileBadges(info) {
+  const el = document.getElementById('profileBadges');
+  if (!el) return;
+  const badges = [];
+  if (info.lob) badges.push(info.lob);
+  if (info.workflow && info.workflow !== '-') badges.push(info.workflow);
+  if (info.channel && info.channel !== '-') badges.push(info.channel);
+  el.innerHTML = badges.map(function (b) { return '<span class="profile-badge">' + escapeHtml(b) + '</span>'; }).join('');
+}
+
+function escapeHtml(str) {
+  const div = document.createElement('div');
+  div.textContent = String(str);
+  return div.innerHTML;
+}
+
+/* ---------- VIEW STATE ---------- */
+// NEW
+function setView(view) {
+  logUsageEvent('view_change', view);
+  currentView = view;
+  document.getElementById('intervalView').classList.toggle('hidden', view !== 'interval');
+  document.getElementById('compareView').classList.toggle('hidden', view !== 'compare');
+  document.getElementById('insightsView').classList.toggle('hidden', view !== 'insights');
+  document.getElementById('intervalNav').classList.toggle('hidden', view === 'calendar');
+  document.getElementById('intervalModeGroup').classList.toggle('hidden', view !== 'interval');
+  document.getElementById('calendarView').classList.toggle('hidden', view !== 'calendar');
+  document.getElementById('calendarNav').classList.toggle('hidden', view !== 'calendar');
+  document.getElementById('profileCard').classList.toggle('hidden', view === 'compare' || view === 'insights');
+  document.getElementById('metricCardsSection').classList.toggle('hidden', view === 'compare' || view === 'insights');
+  ['Interval','Calendar','Compare','Insights'].forEach(function (v) {
+    const btn = document.getElementById('btn' + v);
+    const isActive = view === v.toLowerCase();
+    btn.classList.toggle('active', isActive);
+    btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+  });
+  applyViewFade(view);
+  renderAll();
+}
+
+function applyViewFade(view) {
+  const map = { interval: 'intervalView', calendar: 'calendarView', compare: 'compareView', insights: 'insightsView' };
+  const el = document.getElementById(map[view]);
+  if (!el) return;
+  el.classList.remove('view-fade-in');
+  void el.offsetWidth; // force reflow so the animation restarts
+  el.classList.add('view-fade-in');
+}
+// NEW
+function setIntervalMode(mode) {
+  intervalMode = mode;
+  document.getElementById('btnWeek').classList.toggle('active', mode === 'week');
+  document.getElementById('btnWeek').setAttribute('aria-pressed', mode === 'week' ? 'true' : 'false');
+  document.getElementById('btnMonth').classList.toggle('active', mode === 'month');
+  document.getElementById('btnMonth').setAttribute('aria-pressed', mode === 'month' ? 'true' : 'false');
+  applyViewFade(currentView);
+  renderAll();
+}
+// NEW — last line changed
+function stepInterval(dir) {
+  if (currentView === 'compare' || currentView === 'insights') { weekStart = addDays(weekStart, dir*7); renderAll(); return; }
+  if (intervalMode === 'week') weekStart = addDays(weekStart, dir*7);
+  else monthAnchor = addMonths(monthAnchor, dir);
+  renderAll();
+}
+
+/* ---------- RENDER ---------- */
+function renderAll() {
+  if (!DATA) return;
+  try {
+    if (currentView === 'compare') { renderCompare(); return; }
+    if (currentView === 'insights') { renderInsights(); return; }
+    if (!currentAgent) return;
+    renderMetricCards();
+    if (currentView === 'interval') renderInterval(); else renderCalendar();
+  } catch (err) {
+    console.error(err);
+    showFatalError('Something went wrong rendering this view: ' + err.message, false, false);
+  }
+}
+function renderMetricCards() {
+  const days = currentPeriodDays();
+  const totals = computeMetricTotals([currentAgent], days);
+  const prevTotals = computeMetricTotals([currentAgent], previousPeriodDays());
+
+  const labelEl = document.getElementById('totalHandledLabel');
+  if (labelEl) labelEl.textContent = METRIC_TOTAL_LABEL[currentMetric] || 'Total handled';
+
+  if (!totals.hasData) {
+    document.getElementById('totalHandled').textContent = 'No data this period';
+  } else {
+    renderTrendCard('totalHandled', totals.total, prevTotals.hasData ? prevTotals.total : null,
+      { higherIsBetter: METRIC_HIGHER_IS_BETTER[currentMetric] });
+  }
+
+  if (!totals.tracked) {
+    document.getElementById('avgAht').textContent = 'Not tracked';
+  } else if (!totals.hasData) {
+    document.getElementById('avgAht').textContent = 'No data this period';
+  } else {
+    renderTrendCard('avgAht', totals.avgAht, (prevTotals.hasData && prevTotals.tracked) ? prevTotals.avgAht : null,
+      { isSeconds: true, higherIsBetter: false });
+  }
+
+  document.getElementById('dataAsOf').textContent = DATA.maxDate
+    ? parseDateKey(DATA.maxDate).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})
+    : '—';
+
+  const statsEl = document.getElementById('profileStats');
+  statsEl.innerHTML =
+    '<div class="profile-stat"><span class="profile-stat-label">' + (METRIC_TOTAL_LABEL[currentMetric] || 'Total') + '</span><span class="profile-stat-value">' + (totals.hasData ? totals.total.toLocaleString() : '—') + '</span></div>' +
+    '<div class="profile-stat"><span class="profile-stat-label">Avg Seconds</span><span class="profile-stat-value">' + (totals.tracked && totals.hasData ? fmtSeconds(totals.avgAht) : '—') + '</span></div>';
+}
+
+// NEW
+function buildIntervalTableHtml(agent, days) {
+  let maxVal = 0;
+  const cellData = [];
+  for (let hour = 0; hour < 24; hour++) {
+    const row = [];
+    days.forEach(function (d) {
+      const c = cellValue(agent, toDateKey(d), hour);
+      if (c.value !== null && c.value > maxVal) maxVal = c.value;
+      row.push(c);
+    });
+    cellData.push(row);
+  }
+
+  const dayLabels = days.map(function (d) { return weekdayShort(d) + ' ' + (d.getMonth()+1) + '/' + d.getDate(); });
+
+  let html = '<thead><tr><th class="sticky-col corner-cell" scope="col">Hour</th>';
+  days.forEach(function (d) {
+    const today = isSameDate(d, new Date());
+    html += '<th scope="col" class="' + (today ? 'is-today' : '') + '">' + weekdayShort(d) + '<br><span class="th-date">' + (d.getMonth()+1) + '/' + d.getDate() + '</span></th>';
+  });
+  html += '</tr></thead><tbody>';
+  for (let hour = 0; hour < 24; hour++) {
+    const hLbl = hourLabel(hour);
+    html += '<tr><th scope="row" class="sticky-col">' + hLbl + '</th>';
+    cellData[hour].forEach(function (c, i) { html += renderCell(c, maxVal, false, hLbl, dayLabels[i]); });
+    html += '</tr>';
+  }
+  html += '</tbody>';
+  return html;
+}
+
+function renderInterval() {
+  const days = intervalMode === 'week' ? weekRangeDays() : monthRangeDays(monthAnchor);
+  document.getElementById('intervalLabel').textContent =
+    intervalMode === 'week' ? fmtRangeLabel(days[0], days[days.length-1]) : fmtMonthLabel(monthAnchor);
+  document.getElementById('intervalTable').innerHTML = buildIntervalTableHtml(currentAgent, days);
+}
+
+function renderCompare() {
+  const days = weekRangeDays();
+  document.getElementById('intervalLabel').textContent = fmtRangeLabel(days[0], days[days.length-1]);
+  const container = document.getElementById('compareTables');
+  if (!compareAgents.length) {
+    container.innerHTML = '<p class="placeholder">Pick up to 3 agents to compare.</p>';
+    return;
+  }
+  container.innerHTML = compareAgents.map(function (agent) {
+    const info = (DATA.agentInfo && DATA.agentInfo[agent]) || {};
+    const name = info.name || agent;
+    return '<div class="compare-block">' +
+      '<div class="compare-block-header"><img class="row-avatar" src="' + momaUrl(agent, 64) + '" onerror="this.onerror=null;this.src=\'' + momaFallback(agent, 64) + '\';" alt="">' +
+      '<span>' + escapeHtml(name) + '</span></div>' +
+      '<div class="interval-scroll"><table class="interval-table">' + buildIntervalTableHtml(agent, days) + '</table></div>' +
+      '</div>';
+  }).join('');
+}
+
+function scopedAgents() {
+  return DATA.agents.filter(function (agent) {
+    const info = (DATA.agentInfo && DATA.agentInfo[agent]) || {};
+    return !currentTeamFilter || info.team === currentTeamFilter;
+  });
+}
+
+function aggregateCellValue(agents, dateKey, hour) {
+  const f = METRIC_FIELD[currentChannel];
+  if (currentMetric === 'Reopens' || currentMetric === 'Cases Closed') {
+    const key = currentMetric === 'Reopens' ? 'reopens' : 'casesClosed';
+    let total = 0, any = false;
+    agents.forEach(function (agent) {
+      const rec = hourRecord(agent, dateKey, hour);
+      if (rec && rec[key] !== null && rec[key] !== undefined) { total += rec[key]; any = true; }
+    });
+    return { value: any ? total : null, tracked: true };
+  }
+  if (currentMetric === 'Handled Cases') {
+    let total = 0, any = false;
+    agents.forEach(function (agent) {
+      const rec = hourRecord(agent, dateKey, hour);
+      if (rec && rec[f.countKey] !== null && rec[f.countKey] !== undefined) { total += rec[f.countKey]; any = true; }
+    });
+    return { value: any ? total : null, tracked: true };
+  }
+  if (!f.ahtKey) return { value: null, tracked: false };
+  let wSum = 0, w = 0;
+  agents.forEach(function (agent) {
+    const rec = hourRecord(agent, dateKey, hour);
+    if (rec) {
+      const aht = rec[f.ahtKey], cnt = rec[f.countKey];
+      if (aht !== null && aht !== undefined && cnt) { wSum += aht*cnt; w += cnt; }
+    }
+  });
+  return { value: w ? wSum/w : null, tracked: true };
+}
+
+// NEW
+function buildAggregateTableHtml(agents, days) {
+  let maxVal = 0;
+  const cellData = [];
+  for (let hour = 0; hour < 24; hour++) {
+    const row = [];
+    days.forEach(function (d) {
+      const c = aggregateCellValue(agents, toDateKey(d), hour);
+      if (c.value !== null && c.value > maxVal) maxVal = c.value;
+      row.push(c);
+    });
+    cellData.push(row);
+  }
+  const dayLabels = days.map(function (d) { return weekdayShort(d) + ' ' + (d.getMonth()+1) + '/' + d.getDate(); });
+
+  let html = '<thead><tr><th class="sticky-col corner-cell" scope="col">Hour</th>';
+  days.forEach(function (d) {
+    const today = isSameDate(d, new Date());
+    html += '<th scope="col" class="' + (today ? 'is-today' : '') + '">' + weekdayShort(d) + '<br><span class="th-date">' + (d.getMonth()+1) + '/' + d.getDate() + '</span></th>';
+  });
+  html += '</tr></thead><tbody>';
+  for (let hour = 0; hour < 24; hour++) {
+    const hLbl = hourLabel(hour);
+    html += '<tr><th scope="row" class="sticky-col">' + hLbl + '</th>';
+    cellData[hour].forEach(function (c, i) { html += renderCell(c, maxVal, true, hLbl, dayLabels[i]); });
+    html += '</tr>';
+  }
+  html += '</tbody>';
+  return html;
+}
+
+// NEW
+function computeMetricTotals(agents, days) {
+  const f = METRIC_FIELD[currentChannel];
+  let total = 0, wSum = 0, w = 0, hasData = false;
+  agents.forEach(function (agent) {
+    days.forEach(function (d) {
+      const dateKey = toDateKey(d);
+      for (let hour = 0; hour < 24; hour++) {
+        const rec = hourRecord(agent, dateKey, hour);
+        if (!rec) continue;
+        hasData = true;
+        let metricVal;
+        if (currentMetric === 'Reopens') metricVal = rec.reopens;
+        else if (currentMetric === 'Cases Closed') metricVal = rec.casesClosed;
+        else metricVal = rec[f.countKey]; // Handled Cases and AHT both show case volume here
+        if (metricVal) total += metricVal;
+        if (f.ahtKey) {
+          const aht = rec[f.ahtKey];
+          const cnt = rec[f.countKey];
+          if (aht !== null && aht !== undefined && cnt) { wSum += aht*cnt; w += cnt; }
+        }
+      }
+    });
+  });
+  return { total: total, avgAht: w ? wSum/w : null, tracked: !!f.ahtKey, hasData: hasData };
+}
+
+function renderTrendCard(elId, current, previous, opts) {
+  opts = opts || {};
+  const isSeconds = !!opts.isSeconds;
+  const higherIsBetter = opts.higherIsBetter !== false;
+  const el = document.getElementById(elId);
+  const hasCurrent = current !== null && current !== undefined;
+  const curLabel = hasCurrent ? (isSeconds ? fmtSeconds(current) : current.toLocaleString()) : '—';
+  let deltaHtml = '';
+  if (hasCurrent && previous) {
+    const pct = ((current - previous) / previous) * 100;
+    const up = pct >= 0;
+    const goodDirection = higherIsBetter ? up : !up;
+    const arrow = up ? 'arrow_upward' : 'arrow_downward';
+    const cls = goodDirection ? 'trend-up' : 'trend-down';
+    deltaHtml = '<span class="trend-delta ' + cls + '"><span class="material-symbols-outlined">' + arrow + '</span>' + Math.abs(pct).toFixed(0) + '%</span>';
+  }
+  el.innerHTML = curLabel + deltaHtml;
+}
+
+// NEW
+function renderLeaderboard(agents, days) {
+  const rows = agents.map(function (agent) {
+    const t = computeMetricTotals([agent], days);
+    const info = (DATA.agentInfo && DATA.agentInfo[agent]) || {};
+    const metricVal = currentMetric === 'AHT' ? t.avgAht : t.total;
+    return { name: info.name || agent, value: metricVal, hasData: t.hasData && metricVal !== null && metricVal !== undefined };
+  }).filter(function (r) { return r.hasData; });
+  rows.sort(function (a, b) { return b.value - a.value; });
+
+  const fmt = function (v) { return currentMetric === 'AHT' ? fmtSeconds(v) : v.toLocaleString(); };
+  const buildList = function (list) {
+    return list.map(function (r, i) {
+      return '<li class="leaderboard-row"><span class="leaderboard-rank">' + (i + 1) + '</span>' +
+        '<span class="leaderboard-name">' + escapeHtml(r.name) + '</span>' +
+        '<span class="leaderboard-value">' + fmt(r.value) + '</span></li>';
+    }).join('');
+  };
+
+  const top = rows.slice(0, 5);
+  const bottom = rows.slice(-5).reverse();
+  const metricLabel = (METRIC_TOTAL_LABEL[currentMetric] || currentMetric).toLowerCase();
+  document.getElementById('leaderboardTopTitle').textContent = 'Highest ' + metricLabel;
+  document.getElementById('leaderboardBottomTitle').textContent = 'Lowest ' + metricLabel;
+  document.getElementById('leaderboardTopList').innerHTML = top.length ? buildList(top) : '<li class="leaderboard-row">No data</li>';
+  document.getElementById('leaderboardBottomList').innerHTML = bottom.length ? buildList(bottom) : '<li class="leaderboard-row">No data</li>';
+}
+
+function renderInsights() {
+  const agents = scopedAgents();
+  const thisWeekDays = weekRangeDays();
+  const lastWeekDays = thisWeekDays.map(function (d) { return addDays(d, -7); });
+
+  document.getElementById('intervalLabel').textContent = fmtRangeLabel(thisWeekDays[0], thisWeekDays[thisWeekDays.length-1]);
+  document.getElementById('insightsScopeLabel').textContent =
+    (currentTeamFilter || 'All teams') + ' · ' + agents.length + ' agent' + (agents.length === 1 ? '' : 's');
+
+  const thisWeek = computeMetricTotals(agents, thisWeekDays);
+  const lastWeek = computeMetricTotals(agents, lastWeekDays);
+
+  const totalLabelEl = document.getElementById('insightsTotalLabel');
+  if (totalLabelEl) totalLabelEl.textContent = (METRIC_TOTAL_LABEL[currentMetric] || 'Total handled') + ' (vs last week)';
+
+  renderTrendCard('insightsTotalTrend', thisWeek.total, lastWeek.hasData ? lastWeek.total : null,
+    { higherIsBetter: METRIC_HIGHER_IS_BETTER[currentMetric] });
+  document.getElementById('insightsAhtCard').classList.toggle('hidden', !thisWeek.tracked);
+  if (thisWeek.tracked) {
+    renderTrendCard('insightsAhtTrend', thisWeek.avgAht, lastWeek.tracked ? lastWeek.avgAht : null,
+      { isSeconds: true, higherIsBetter: false });
+  }
+
+  renderLeaderboard(agents, thisWeekDays);
+  document.getElementById('insightsAggTable').innerHTML = buildAggregateTableHtml(agents, thisWeekDays);
+}
+// NEW
+function cellTooltipText(c, label) {
+  if (currentMetric === 'AHT' && c.count) {
+    return label + ' AHT · ' + c.count.toLocaleString() + ' case' + (c.count === 1 ? '' : 's');
+  }
+  return label;
+}
+
+function renderCell(c, maxVal, checkThreshold, hourLbl, dayLbl) {
+  const context = (hourLbl && dayLbl) ? (dayLbl + ', ' + hourLbl + ': ') : '';
+  if (!c.tracked) {
+    return '<td class="cell cell-nt" data-tooltip="Not tracked" aria-label="' + context + 'not tracked">NT</td>';
+  }
+  if (c.value === null || c.value === undefined || c.value === 0) {
+    return '<td class="cell cell-empty" aria-label="' + context + 'no activity">–</td>';
+  }
+  const label = currentMetric === 'AHT' ? fmtSeconds(c.value) : c.value;
+  const tooltip = cellTooltipText(c, label);
+  if (checkThreshold && currentMetric === 'AHT') {
+    const target = AHT_TARGETS[currentChannel];
+    if (target && c.value > target) {
+      const breachTooltip = tooltip + ' (target ' + target + 's)';
+      return '<td class="cell cell-breach" data-tooltip="' + breachTooltip + '" aria-label="' + context + breachTooltip + '">' + label + '</td>';
+    }
+  }
+  const pct = maxVal ? Math.min(c.value / maxVal, 1) : 0;
+  const alpha = 0.12 + pct * 0.78;
+  const textCls = alpha > 0.55 ? ' cell-light-text' : '';
+  return '<td class="cell' + textCls + '" style="background: rgba(66,133,244,' + alpha.toFixed(2) + ');" data-tooltip="' + tooltip + '" aria-label="' + context + tooltip + '">' + label + '</td>';
+}
+
+function renderCalendar() {
+  document.getElementById('calendarLabel').textContent = fmtMonthLabel(calAnchor);
+  document.getElementById('calendarWeekdays').innerHTML =
+    ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map(function (w) { return '<div>' + w + '</div>'; }).join('');
+
+  const first = new Date(calAnchor.getFullYear(), calAnchor.getMonth(), 1);
+  const startPad = first.getDay();
+  const daysInMonth = new Date(calAnchor.getFullYear(), calAnchor.getMonth()+1, 0).getDate();
+
+  let maxVal = 0;
+  const values = {};
+  for (let day = 1; day <= daysInMonth; day++) {
+    const dk = toDateKey(new Date(calAnchor.getFullYear(), calAnchor.getMonth(), day));
+    const agg = dayAggregate(currentAgent, dk);
+    values[dk] = agg;
+    if (agg.value !== null && agg.value > maxVal) maxVal = agg.value;
+  }
+
+  let html = '';
+  for (let i = 0; i < startPad; i++) html += '<div class="cal-cell cal-empty"></div>';
+  for (let day = 1; day <= daysInMonth; day++) {
+    const d = new Date(calAnchor.getFullYear(), calAnchor.getMonth(), day);
+    const dk = toDateKey(d);
+    const agg = values[dk];
+    const today = isSameDate(d, new Date());
+    let bg = 'transparent', label = '–';
+    if (agg.tracked === false) { label = 'NT'; }
+    else if (agg.value !== null && agg.value !== 0) {
+      const pct = maxVal ? Math.min(agg.value/maxVal,1) : 0;
+      bg = 'rgba(66,133,244,' + (0.1+pct*0.7).toFixed(2) + ')';
+      label = currentMetric === 'AHT' ? fmtSeconds(agg.value) : agg.value;
+    }
+    html += '<div class="cal-cell' + (today?' is-today':'') + '" data-date="' + dk + '">' +
+      '<span class="cal-daynum">' + day + '</span>' +
+      '<span class="cal-value" style="background:' + bg + '">' + label + '</span></div>';
+  }
+  const grid = document.getElementById('calendarGrid');
+  grid.innerHTML = html;
+  grid.querySelectorAll('.cal-cell[data-date]').forEach(function (cell) {
+    cell.setAttribute('tabindex', '0');
+    cell.setAttribute('role', 'button');
+    const jumpToDay = function () {
+      const d = parseDateKey(cell.getAttribute('data-date'));
+      weekStart = sundayOf(d);
+      intervalMode = 'week';
+      document.getElementById('btnWeek').classList.add('active');
+      document.getElementById('btnMonth').classList.remove('active');
+      setView('interval');
+    };
+    cell.addEventListener('click', jumpToDay);
+    cell.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); jumpToDay(); }
+    });
+  });
+}
+
+/* ---------- CSV EXPORT ---------- */
+function downloadCsv(filename, rows) {
+  const csv = rows.map(function (row) {
+    return row.map(function (v) {
+      const s = (v === null || v === undefined) ? '' : String(v);
+      return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+    }).join(',');
+  }).join('\r\n');
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+function safeFileToken(s) { return String(s).replace(/[^a-z0-9]+/gi, '_'); }
+
+// NEW
+function exportIntervalCsv() {
+  const days = intervalMode === 'week' ? weekRangeDays() : monthRangeDays(monthAnchor);
+  const info = (DATA.agentInfo && DATA.agentInfo[currentAgent]) || {};
+  const header = ['Hour'].concat(days.map(function (d) { return (d.getMonth()+1) + '/' + d.getDate(); }));
+  const rows = [
+    ['Agent', info.name || currentAgent, currentAgent],
+    ['Metric', currentMetric, 'Channel', currentChannel],
+    [],
+    header
+  ];
+  for (let hour = 0; hour < 24; hour++) {
+    const row = [hourLabel(hour)];
+    days.forEach(function (d) {
+      const c = cellValue(currentAgent, toDateKey(d), hour);
+      row.push(c.tracked ? (c.value === null ? '' : c.value) : 'NT');
+    });
+    rows.push(row);
+  }
+  downloadCsv('MyPlayCases_' + safeFileToken(info.name || currentAgent) + '_' + safeFileToken(currentMetric) + '.csv', rows);
+}
+
+// NEW
+function exportCalendarCsv() {
+  const daysInMonth = new Date(calAnchor.getFullYear(), calAnchor.getMonth()+1, 0).getDate();
+  const info = (DATA.agentInfo && DATA.agentInfo[currentAgent]) || {};
+  const rows = [
+    ['Agent', info.name || currentAgent, currentAgent],
+    ['Metric', currentMetric, 'Channel', currentChannel],
+    [],
+    ['Date', currentMetric]
+  ];
+  for (let day = 1; day <= daysInMonth; day++) {
+    const d = new Date(calAnchor.getFullYear(), calAnchor.getMonth(), day);
+    const dk = toDateKey(d);
+    const agg = dayAggregate(currentAgent, dk);
+    rows.push([dk, agg.tracked ? (agg.value === null ? '' : agg.value) : 'NT']);
+  }
+  downloadCsv('MyPlayCases_' + safeFileToken(info.name || currentAgent) + '_' + safeFileToken(fmtMonthLabel(calAnchor)) + '.csv', rows);
+}
+
+// NEW
+function exportCompareCsv() {
+  if (!compareAgents.length) return;
+  const days = weekRangeDays();
+  const rows = [['Metric', currentMetric, 'Channel', currentChannel], []];
+  compareAgents.forEach(function (agent, idx) {
+    const info = (DATA.agentInfo && DATA.agentInfo[agent]) || {};
+    if (idx > 0) rows.push([]);
+    rows.push([info.name || agent]);
+    rows.push(['Hour'].concat(days.map(function (d) { return (d.getMonth()+1) + '/' + d.getDate(); })));
+    for (let hour = 0; hour < 24; hour++) {
+      const row = [hourLabel(hour)];
+      days.forEach(function (d) {
+        const c = cellValue(agent, toDateKey(d), hour);
+        row.push(c.tracked ? (c.value === null ? '' : c.value) : 'NT');
+      });
+      rows.push(row);
+    }
+  });
+  downloadCsv('MyPlayCases_Compare_' + safeFileToken(currentMetric) + '.csv', rows);
+}
+
+// NEW
+function exportInsightsCsv() {
+  const agents = scopedAgents();
+  const days = weekRangeDays();
+  const rows = [
+    ['Scope', currentTeamFilter || 'All teams', 'Agents', agents.length],
+    ['Metric', currentMetric, 'Channel', currentChannel],
+    [],
+    ['Hour'].concat(days.map(function (d) { return (d.getMonth()+1) + '/' + d.getDate(); }))
+  ];
+  for (let hour = 0; hour < 24; hour++) {
+    const row = [hourLabel(hour)];
+    days.forEach(function (d) {
+      const c = aggregateCellValue(agents, toDateKey(d), hour);
+      row.push(c.tracked ? (c.value === null ? '' : c.value) : 'NT');
+    });
+    rows.push(row);
+  }
+  downloadCsv('MyPlayCases_Insights_' + safeFileToken(currentTeamFilter || 'AllTeams') + '_' + safeFileToken(currentMetric) + '.csv', rows);
+}
+
+function exportCurrentView() {
+  if (!DATA) return;
+  if (currentView === 'interval') exportIntervalCsv();
+  else if (currentView === 'calendar') exportCalendarCsv();
+  else if (currentView === 'compare') exportCompareCsv();
+  else if (currentView === 'insights') exportInsightsCsv();
+}
+
+/* ---------- SMOKE TEST ---------- */
+/* Run manually from the browser console after any deploy: runSmokeTest() */
+function runSmokeTest() {
+  const results = [];
+  function check(label, cond) { results.push({ label: label, pass: !!cond }); }
+
+  check('DATA loaded', !!DATA);
+  check('Agents list non-empty', DATA && DATA.agents && DATA.agents.length > 0);
+  check('currentAgent set', !!currentAgent);
+  if (DATA && currentAgent) {
+    const days = currentPeriodDays();
+    const totals = computeMetricTotals([currentAgent], days);
+    check('computeMetricTotals returns object', totals && typeof totals === 'object');
+    check('computeMetricTotals.total is a number', typeof totals.total === 'number');
+    check('computeMetricTotals.hasData is boolean', typeof totals.hasData === 'boolean');
+  }
+  check('renderMetricCards is a function', typeof renderMetricCards === 'function');
+  check('METRIC_TOTAL_LABEL covers all metrics',
+    !!METRIC_TOTAL_LABEL['Handled Cases'] && !!METRIC_TOTAL_LABEL['Reopens'] &&
+    !!METRIC_TOTAL_LABEL['Cases Closed'] && !!METRIC_TOTAL_LABEL['AHT']);
+
+  const failed = results.filter(function (r) { return !r.pass; });
+  console.log('MyPlayCases smoke test: ' + (results.length - failed.length) + '/' + results.length + ' passed');
+  results.forEach(function (r) { console.log((r.pass ? '✅ ' : '❌ ') + r.label); });
+  if (failed.length) console.warn('FAILURES:', failed.map(function (f) { return f.label; }));
+  return failed.length === 0;
+}
+</script>
