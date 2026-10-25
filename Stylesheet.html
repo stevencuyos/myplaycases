@@ -12,6 +12,24 @@
     --g-surface: #FFFFFF;
   }
 
+  body.dark-mode {
+    --g-text: #E8EAED;
+    --g-text-secondary: #9AA0A6;
+    --g-border: #3C4043;
+    --g-bg: #202124;
+    --g-surface: #292A2D;
+  }
+
+  body.dark-mode .topbar {
+    background: #202124;
+    border-bottom: 1px solid var(--g-border);
+  }
+
+  body.dark-mode .interval-table th,
+  body.dark-mode .interval-table td {
+    border-color: #3C4043;
+  }
+
   * { box-sizing: border-box; }
 
   body {
