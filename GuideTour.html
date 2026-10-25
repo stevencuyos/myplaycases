@@ -1,0 +1,120 @@
+<script>
+/* ---------- GUIDED TOUR ---------- */
+const TOUR_STEPS = [
+  { selector: '#metricSelect', title: 'Pick a metric', text: 'Switch between Handled cases, AHT, Reopens, and Cases closed.', placement: 'bottom' },
+  { selector: '#channelTrigger', title: 'Filter by channel', text: 'Chat, Phone, and Email each track different fields — AHT isn\'t tracked for Email.', placement: 'bottom' },
+  { selector: '#agentTrigger', title: 'Choose an agent', text: 'Search by name or LDAP. Star an agent to pin them to Favorites.', placement: 'bottom' },
+  { selector: '#teamFilterSelect', title: 'Scope by team', text: 'Leads default to their own team here — switch to "All teams" any time.', placement: 'bottom' },
+  { selector: '#intervalModeGroup', title: 'Week or month', text: 'Toggle the interval grid between a 7-day window and the full month.', placement: 'bottom' },
+  { selector: '#btnCompare', title: 'Compare agents', text: 'Pick up to 3 agents to see their heatmaps side by side.', placement: 'bottom' },
+  { selector: '#btnInsights', title: 'Team insights', text: 'Aggregate trends for the whole team or site, with AHT-target highlighting.', placement: 'bottom' },
+  { selector: '#exportBtn', title: 'Export to CSV', text: 'Downloads whatever view you\'re currently looking at.', placement: 'left' },
+  { selector: '#refreshBtn', title: 'Refresh data', text: 'Data is cached for 10 minutes — refresh forces a fresh read.', placement: 'left' },
+  { selector: '#helpBtn', title: 'Come back any time', text: 'Reopen this panel, or replay this tour, from the help icon.', placement: 'left' }
+];
+
+let tourStepIndex = 0;
+let tourResizeHandler = null;
+
+function startTour() {
+  logUsageEvent('tour', 'start');
+  document.getElementById('tourBackdrop').classList.remove('hidden');
+  showTourStep(0);
+}
+
+function endTour(completed) {
+  logUsageEvent('tour', completed ? 'complete' : 'skip');
+  document.getElementById('tourBackdrop').classList.add('hidden');
+  document.getElementById('tourHighlight').classList.add('hidden');
+  document.getElementById('tourCard').classList.add('hidden');
+  window.removeEventListener('resize', tourResizeHandler);
+  savePrefs({ tourSeen: true });
+}
+
+function visibleTourSteps_() {
+  return TOUR_STEPS.filter(function (s) { return document.querySelector(s.selector); });
+}
+
+function showTourStep(idx) {
+  const steps = visibleTourSteps_();
+  if (!steps.length) { endTour(false); return; }
+  if (idx >= steps.length) { endTour(true); return; }
+  tourStepIndex = idx;
+  const step = steps[idx];
+  const target = document.querySelector(step.selector);
+  positionTourStep(target, step);
+  tourResizeHandler = function () { positionTourStep(target, step); };
+  window.removeEventListener('resize', tourResizeHandler);
+  window.addEventListener('resize', tourResizeHandler);
+
+  document.getElementById('tourStepTitle').textContent = step.title;
+  document.getElementById('tourStepText').textContent = step.text;
+  document.getElementById('tourStepCount').textContent = (idx + 1) + ' / ' + steps.length;
+  document.getElementById('tourBackBtn').classList.toggle('hidden', idx === 0);
+  document.getElementById('tourNextBtn').textContent = (idx === steps.length - 1) ? 'Done' : 'Next';
+  document.getElementById('tourCard').classList.remove('hidden');
+  document.getElementById('tourHighlight').classList.remove('hidden');
+}
+
+function positionTourStep(target, step) {
+  const rect = target.getBoundingClientRect();
+  const pad = 6;
+  const highlight = document.getElementById('tourHighlight');
+  highlight.style.top = (rect.top - pad + window.scrollY) + 'px';
+  highlight.style.left = (rect.left - pad + window.scrollX) + 'px';
+  highlight.style.width = (rect.width + pad * 2) + 'px';
+  highlight.style.height = (rect.height + pad * 2) + 'px';
+
+  const card = document.getElementById('tourCard');
+  card.style.visibility = 'hidden';
+  card.classList.remove('hidden');
+  const cardRect = card.getBoundingClientRect();
+  let top, left;
+  if (step.placement === 'left') {
+    top = rect.top + window.scrollY;
+    left = rect.left + window.scrollX - cardRect.width - 16;
+  } else {
+    top = rect.bottom + window.scrollY + 14;
+    left = rect.left + window.scrollX;
+  }
+  left = Math.max(12, Math.min(left, window.innerWidth - cardRect.width - 12));
+  top = Math.max(12, top);
+  card.style.top = top + 'px';
+  card.style.left = left + 'px';
+  card.style.visibility = 'visible';
+}
+
+function tourNext() {
+  const steps = visibleTourSteps_();
+  if (tourStepIndex + 1 >= steps.length) endTour(true);
+  else showTourStep(tourStepIndex + 1);
+}
+function tourBack() { showTourStep(Math.max(0, tourStepIndex - 1)); }
+
+/* ---------- HELP PANEL ---------- */
+function openHelpPanel() {
+  logUsageEvent('click', 'help_panel_open');
+  document.getElementById('helpPanel').classList.add('open');
+  document.getElementById('helpBackdrop').classList.remove('hidden');
+}
+function closeHelpPanel() {
+  document.getElementById('helpPanel').classList.remove('open');
+  document.getElementById('helpBackdrop').classList.add('hidden');
+}
+
+function initGuideTour() {
+  document.getElementById('helpBtn').addEventListener('click', openHelpPanel);
+  document.getElementById('helpPanelClose').addEventListener('click', closeHelpPanel);
+  document.getElementById('helpBackdrop').addEventListener('click', closeHelpPanel);
+  document.getElementById('helpReplayTour').addEventListener('click', function () {
+    closeHelpPanel();
+    startTour();
+  });
+  document.getElementById('tourSkipBtn').addEventListener('click', function () { endTour(false); });
+  document.getElementById('tourNextBtn').addEventListener('click', tourNext);
+  document.getElementById('tourBackBtn').addEventListener('click', tourBack);
+
+  const prefs = loadPrefs();
+  if (!prefs.tourSeen) setTimeout(startTour, 600); // let layout settle after first render
+}
+</script>
