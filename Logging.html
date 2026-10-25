@@ -1,0 +1,29 @@
+<script>
+/* ---------- USAGE LOGGING (basic: opens, navigation, clicks) ---------- */
+const USAGE_FLUSH_INTERVAL_MS = 30000;
+const USAGE_MAX_BUFFER = 50;
+let usageBuffer = [];
+let usageFlushTimer = null;
+
+function logUsageEvent(event, detail) {
+  usageBuffer.push({ event: event, detail: detail || '', ts: Date.now() });
+  if (usageBuffer.length >= USAGE_MAX_BUFFER) flushUsageEvents();
+}
+
+function flushUsageEvents() {
+  if (!usageBuffer.length) return;
+  const batch = usageBuffer;
+  usageBuffer = [];
+  google.script.run
+    .withFailureHandler(function () { /* best-effort; drop on failure */ })
+    .logEvents(batch);
+}
+
+function startUsageFlushLoop() {
+  clearInterval(usageFlushTimer);
+  usageFlushTimer = setInterval(flushUsageEvents, USAGE_FLUSH_INTERVAL_MS);
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'hidden') flushUsageEvents();
+  });
+}
+</script>
