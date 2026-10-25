@@ -841,6 +841,7 @@ function stepInterval(dir) {
 function renderAll() {
   if (!DATA) return;
   try {
+    updateLegend();
     if (currentView === 'compare') { renderCompare(); return; }
     if (currentView === 'insights') { renderInsights(); return; }
     if (!currentAgent) return;
@@ -849,6 +850,25 @@ function renderAll() {
   } catch (err) {
     console.error(err);
     showFatalError('Something went wrong rendering this view: ' + err.message, false, false);
+  }
+}
+
+function updateLegend() {
+  const legend = document.getElementById('globalLegend');
+  if (!legend) return;
+
+  if (currentMetric === 'AHT') {
+    legend.innerHTML =
+      '<span class="legend-item"><span class="legend-swatch" style="background: hsl(120, 75%, 50%); border-radius: 3px;"></span>Good</span>' +
+      '<span class="legend-item"><span class="legend-swatch" style="background: hsl(45, 75%, 50%); border-radius: 3px;"></span>Near target</span>' +
+      '<span class="legend-item"><span class="legend-swatch" style="background: hsl(0, 75%, 50%); border-radius: 3px;"></span>Over target</span>' +
+      '<span class="legend-item"><span class="legend-swatch legend-empty-swatch"></span>– No activity</span>' +
+      '<span class="legend-item"><span class="legend-swatch legend-nt-swatch"></span>NT — not tracked</span>';
+  } else {
+    legend.innerHTML =
+      '<span class="legend-item"><span class="legend-swatch legend-data-swatch"></span>Has data (darker = higher)</span>' +
+      '<span class="legend-item"><span class="legend-swatch legend-empty-swatch"></span>– No activity that hour</span>' +
+      '<span class="legend-item"><span class="legend-swatch legend-nt-swatch"></span>NT — not tracked for this channel</span>';
   }
 }
 function renderMetricCards() {
@@ -1120,6 +1140,37 @@ function cellTooltipText(c, label) {
   return label;
 }
 
+function getCellColor(value, maxVal, metric, channel) {
+  if (metric === 'AHT') {
+    const target = AHT_TARGETS[channel];
+    if (!target) return 'rgba(66,133,244,0.5)'; // fallback blue if no target
+
+    const pctTarget = value / target;
+
+    // Green (Hue 120) when under target.
+    // Transitions to Yellow (Hue 45) at target,
+    // then to Red (Hue 0) as it goes over target.
+
+    let hue, lightness = 50; // HSL lightness
+    if (pctTarget <= 1) {
+      // Scale from 0.7x target (Green) to 1.0x target (Yellow)
+      const greenPct = Math.max(0, (pctTarget - 0.7) / 0.3); // 0 at 0.7x, 1 at target
+      hue = 120 - (greenPct * 75); // 120 is green, 45 is yellow
+    } else {
+      // Over target: Yellow (45) down to Red (0) as it hits 1.3x target
+      const redPct = Math.min(1, (pctTarget - 1.0) / 0.3);
+      hue = 45 - (redPct * 45);
+    }
+
+    return 'hsl(' + hue.toFixed(0) + ', 75%, ' + lightness + '%)';
+  } else {
+    // Standard Blue scaling for other metrics
+    const pct = maxVal ? Math.min(value / maxVal, 1) : 0;
+    const alpha = 0.12 + pct * 0.78;
+    return 'rgba(26,115,232,' + alpha.toFixed(2) + ')'; // new Google Blue
+  }
+}
+
 function renderCell(c, maxVal, checkThreshold, hourLbl, dayLbl) {
   const context = (hourLbl && dayLbl) ? (dayLbl + ', ' + hourLbl + ': ') : '';
   if (!c.tracked) {
@@ -1130,17 +1181,16 @@ function renderCell(c, maxVal, checkThreshold, hourLbl, dayLbl) {
   }
   const label = currentMetric === 'AHT' ? fmtSeconds(c.value) : c.value;
   const tooltip = cellTooltipText(c, label);
-  if (checkThreshold && currentMetric === 'AHT') {
-    const target = AHT_TARGETS[currentChannel];
-    if (target && c.value > target) {
-      const breachTooltip = tooltip + ' (target ' + target + 's)';
-      return '<td class="cell cell-breach" data-tooltip="' + breachTooltip + '" aria-label="' + context + breachTooltip + '">' + label + '</td>';
-    }
+
+  const bg = getCellColor(c.value, maxVal, currentMetric, currentChannel);
+
+  // Use light text for everything except very light blues
+  let textCls = ' cell-light-text';
+  if (currentMetric !== 'AHT' && maxVal && (c.value / maxVal) < 0.45) {
+    textCls = '';
   }
-  const pct = maxVal ? Math.min(c.value / maxVal, 1) : 0;
-  const alpha = 0.12 + pct * 0.78;
-  const textCls = alpha > 0.55 ? ' cell-light-text' : '';
-  return '<td class="cell' + textCls + '" style="background: rgba(66,133,244,' + alpha.toFixed(2) + ');" data-tooltip="' + tooltip + '" aria-label="' + context + tooltip + '">' + label + '</td>';
+
+  return '<td class="cell' + textCls + '" style="background: ' + bg + ';" data-tooltip="' + tooltip + '" aria-label="' + context + tooltip + '">' + label + '</td>';
 }
 
 function renderCalendar() {
@@ -1169,15 +1219,21 @@ function renderCalendar() {
     const agg = values[dk];
     const today = isSameDate(d, new Date());
     let bg = 'transparent', label = '–';
+    let textCls = '';
     if (agg.tracked === false) { label = 'NT'; }
     else if (agg.value !== null && agg.value !== 0) {
-      const pct = maxVal ? Math.min(agg.value/maxVal,1) : 0;
-      bg = 'rgba(66,133,244,' + (0.1+pct*0.7).toFixed(2) + ')';
+      bg = getCellColor(agg.value, maxVal, currentMetric, currentChannel);
       label = currentMetric === 'AHT' ? fmtSeconds(agg.value) : agg.value;
+
+      // Determine text color for calendar blocks
+      textCls = ' cell-light-text';
+      if (currentMetric !== 'AHT' && maxVal && (agg.value / maxVal) < 0.45) {
+        textCls = '';
+      }
     }
     html += '<div class="cal-cell' + (today?' is-today':'') + '" data-date="' + dk + '">' +
       '<span class="cal-daynum">' + day + '</span>' +
-      '<span class="cal-value" style="background:' + bg + '">' + label + '</span></div>';
+      '<span class="cal-value' + textCls + '" style="background:' + bg + '">' + label + '</span></div>';
   }
   const grid = document.getElementById('calendarGrid');
   grid.innerHTML = html;
