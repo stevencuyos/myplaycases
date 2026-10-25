@@ -49,8 +49,56 @@ function getAllData(bypassCache) {
     agentInfo: shared.agentInfo,
     warnings: shared.warnings || [],
     computedAt: shared.computedAt,
-    viewer: { ldap: viewerLdap, info: viewerInfo, isLead: isLead }
+    viewer: { ldap: viewerLdap, info: viewerInfo, isLead: isLead },
+    triggerSetup: hasBackgroundTrigger_()
   };
+}
+
+function refreshCacheBackground() {
+  getSharedData_(true); // bypass cache, force recompute and save
+}
+
+function setupBackgroundTrigger() {
+  const viewerEmail = Session.getActiveUser().getEmail();
+  const viewerLdap = viewerEmail ? viewerEmail.split('@')[0] : '';
+  const agentInfo = getAgentDirectory_();
+  const viewerInfo = agentInfo[viewerLdap] || null;
+  const isLead = !!(viewerInfo && /supervisor|manager/i.test(viewerInfo.role || ''));
+
+  if (!isLead) {
+    throw new Error('Only leads can setup background triggers.');
+  }
+
+  const props = PropertiesService.getScriptProperties();
+  if (props.getProperty('auto_refresh_setup') === 'true') {
+      return true;
+  }
+
+  removeBackgroundTrigger(); // Clear any existing first
+  ScriptApp.newTrigger('refreshCacheBackground')
+    .timeBased()
+    .everyMinutes(10)
+    .create();
+
+  props.setProperty('auto_refresh_setup', 'true');
+  return true;
+}
+
+function removeBackgroundTrigger() {
+  const props = PropertiesService.getScriptProperties();
+  const triggers = ScriptApp.getProjectTriggers();
+  for (let i = 0; i < triggers.length; i++) {
+    if (triggers[i].getHandlerFunction() === 'refreshCacheBackground') {
+      ScriptApp.deleteTrigger(triggers[i]);
+    }
+  }
+  props.deleteProperty('auto_refresh_setup');
+  return false;
+}
+
+function hasBackgroundTrigger_() {
+  const props = PropertiesService.getScriptProperties();
+  return props.getProperty('auto_refresh_setup') === 'true';
 }
 
 // Temporary debug helper — run this if getAllData() can't find the sheet.

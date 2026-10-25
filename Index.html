@@ -19,6 +19,12 @@
       </div>
     </div>
     <div class="topbar-actions">
+      <button class="refresh-btn hidden" id="autoRefreshToggleBtn" type="button" data-tooltip="Enable background auto-refresh" aria-label="Enable auto refresh">
+        <span class="material-symbols-outlined" id="autoRefreshIcon">update</span>
+      </button>
+      <button class="refresh-btn" id="darkModeToggleBtn" type="button" data-tooltip="Toggle Dark Mode" aria-label="Toggle Dark Mode">
+        <span class="material-symbols-outlined" id="darkModeIcon">dark_mode</span>
+      </button>
       <button class="refresh-btn" id="exportBtn" type="button" data-tooltip="Export current view as CSV" aria-label="Export current view as CSV">
         <span class="material-symbols-outlined">download</span>
       </button>
@@ -209,7 +215,7 @@
       </div>
     </section>
 
-    <p class="cell-legend">
+    <p class="cell-legend" id="globalLegend">
       <span class="legend-item"><span class="legend-swatch legend-data-swatch"></span>Has data (darker = higher)</span>
       <span class="legend-item"><span class="legend-swatch legend-empty-swatch"></span>– No activity that hour</span>
       <span class="legend-item"><span class="legend-swatch legend-nt-swatch"></span>NT — not tracked for this channel</span>
@@ -289,7 +295,6 @@
       </div>
       <p class="insights-subheading">
         Team heatmap — this week
-        <span class="insights-legend"><span class="legend-swatch legend-breach"></span>Over AHT target</span>
       </p>
       <div class="interval-scroll">
         <table class="interval-table" id="insightsAggTable"></table>

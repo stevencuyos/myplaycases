@@ -55,7 +55,6 @@ function computeSharedData_() {
   validateHeader_(data[CONFIG.HEADER_ROW - 1], CONFIG.COLS, CONFIG.RAW_SHEET);
   const rows = data.slice(CONFIG.HEADER_ROW);
   const C = CONFIG.COLS;
-  const tz = Session.getScriptTimeZone();
 
   const index = {};
   const agents = new Set();
@@ -75,7 +74,9 @@ function computeSharedData_() {
         return;
       }
 
-      const dateKey = Utilities.formatDate(new Date(day), tz, 'yyyy-MM-dd');
+      // Native JS date formatting is much faster than Utilities.formatDate in a loop
+      const d = new Date(day);
+      const dateKey = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
       agents.add(agent);
       if (!minDate || dateKey < minDate) minDate = dateKey;
       if (!maxDate || dateKey > maxDate) maxDate = dateKey;
